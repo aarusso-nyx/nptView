@@ -1,19 +1,17 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, timer, of, from, delay } from 'rxjs';
-import { concatMap, map, scan, switchMap, tap  } from 'rxjs/operators';
+import { Observable, timer, of } from 'rxjs';
+import { map, switchMap, tap  } from 'rxjs/operators';
 import  groupBy  from 'lodash-es/groupBy';
 import  mapValues  from 'lodash-es/mapValues';
 import  values  from 'lodash-es/values';
+
 import * as Cesium from 'cesium';
 
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 
-import { interpolate } from './interpolate';
 import { modelOf } from './modelOf';
-
-
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
@@ -64,8 +62,7 @@ export interface VesselTrack {
   providedIn: 'root'
 })
 export class SeascapeService {
-  private readonly apiUrl = 'https://api.navalport.com/nais/seascape/';
-  private readonly apiTrack = 'https://api.navalport.com/nais/tracking/';
+  private readonly naisAPI = 'https://api.navalport.com/nais';
   
   constructor(private http: HttpClient) {
     const loader = new GLTFLoader();
@@ -107,99 +104,53 @@ export class SeascapeService {
       }));      
     };
 
+    const addPos = (p: VesselData, model: Cesium.Entity) => {
+      const head = (p.head || p.cog || 0.0);
+      const t = Cesium.JulianDate.fromDate( new Date(p.tstamp * 1000) );
+      
+      const pos = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 0.0);
+      // const ais = Cesium.Cartesian3.fromElements(-p.dimStern, -p.dimPort, -(p.draught || 10.0) );
+      // Cesium.Cartesian3.add(pos, ais, pos);
+      const dir = new Cesium.HeadingPitchRoll(Cesium.Math.toRadians(head), 0, 0)
+      const ori = Cesium.Transforms.headingPitchRollQuaternion(pos,dir);
+      
+      const oriTrack = model.orientation as Cesium.SampledProperty;
+      const posTrack = model.position as Cesium.SampledPositionProperty;
+      posTrack.addSample(t, pos);
+      oriTrack.addSample(t, ori);
+    }
+
+    const refresh = (viewer: Cesium.Viewer, data: VesselData[]) => {
+      console.log('refresh');
+      data.forEach ( vessel => {
+        const model = viewer.entities.getById(vessel.mmsi.toString())!;
+        addPos(vessel, model);
+      });
+
+      viewer.clock.stopTime = Cesium.JulianDate.now();
+    }
+
     const animate = (viewer: Cesium.Viewer, data: VesselData[]): void => {
       data.forEach ( vessel => {
-        console.log(vessel);
         const model = viewer.entities.add( this.vessel(vessel) );
-
-        // add trackings
-        const posTrack = new Cesium.SampledPositionProperty();
-        const oriTrack = new Cesium.SampledProperty(Cesium.Quaternion);
-
         vessel.track!.forEach( (p: VesselData) => {
-          const head = (p.head || p.cog || 0.0);
-          const ais = Cesium.Cartesian3.fromElements(-p.dimStern, -p.dimPort, -(p.draught || 10.0) );
-          const t = Cesium.JulianDate.fromDate( new Date(p.tstamp * 1000) );
-          const pos = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 0.0);
-          // Cesium.Cartesian3.add(pos, ais, pos);
-
-          const dir = new Cesium.HeadingPitchRoll(Cesium.Math.toRadians(head), 0, 0)
-          const ori = Cesium.Transforms.headingPitchRollQuaternion(pos,dir);
-
-          posTrack.addSample(t, pos);
-          oriTrack.addSample(t, ori);
+          addPos (p, model);
         });
-
-        model.position    = posTrack;
-        model.orientation = oriTrack;
       });
     };
 
-    const uri = `${this.apiTrack}${port_code}`;
+    const uriTrack = `${this.naisAPI}/tracking/${port_code}`;
+    const uriScape = `${this.naisAPI}/seascape/${port_code}`;
     return of(qs).pipe(
-      switchMap(qs => this.http.get<VesselTrack>(uri, { params: qs })),
+      switchMap(qs => this.http.get<VesselTrack>(uriTrack, { params: qs })),
       map(data => cast(data)),
       map(data => reformat(data)),
       tap(data => animate(viewer, data)), 
+      switchMap(done => timer(120000, 120000)),
+      switchMap(tick => this.http.get<VesselData[]>(uriScape)),
+      tap(data => refresh(viewer, data)),
     );
   }
-
-  //////////////////////////////////////////////////////////////////////////////////////////
-  //////////////////////////////////////////////////////////////////////////////////////////
-  seascape(viewer: Cesium.Viewer, port_code: string, mdt: number, steps: number): Observable<void> {
-    const url = `${this.apiUrl}${port_code}`;
-    const dT = mdt * 1000;
-    const dt = dT / steps;
-
-    return timer(0, dT)
-        .pipe(
-            map(() => ({ 
-              ts: Cesium.JulianDate.toDate ( viewer.clock.startTime ).getTime() / 1000,
-              tf: Cesium.JulianDate.toDate ( viewer.clock.stopTime ).getTime() / 1000,
-              dt: 120,
-            })),
-            tap(clock => { console.log(clock);  }),
-            // Fetch Data
-            switchMap(() => this.http.get<VesselData[]>(url)),
-            // Store last two data sets
-            scan((acc: VesselData[][], curr: VesselData[]) => [acc[1], curr], []),
-            // interpolate 
-            concatMap(([prev, curr]) => from(Array(steps).fill(0).map((_, i) =>  interpolate(prev, curr, i / (steps - 1))))),
-            // add a delay between each step
-            concatMap(data => of(data).pipe(delay(dt))), 
-            // render
-            map(data => data.forEach(p => this.render(viewer, p))),
-        );
-  }
-
- 
-
-  //////////////////////////////////////////////////////////////////////////////////////////
-  //////////////////////////////////////////////////////////////////////////////////////////
-  private render ( viewer: Cesium.Viewer, p: VesselData ): void {
-    const id = p.mmsi.toString();
-  
-    // if the ship is not in the ships array, create it
-    let vessel = viewer.entities.getById(id); 
-    if ( !vessel ) {
-      vessel = viewer.entities.add( this.vessel(p) );
-    } 
-
-    const draft = (p.draught || 7.0);
-    const head = (p.head || p.cog || 0.0);
-  
-    const ref = Cesium.Cartesian3.fromElements(p.dimStern, p.dimPort, -draft);
-    // Create a quaternion to rotate model according to the vessel's heading
-    const pos = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 0.0);
-    Cesium.Cartesian3.add(pos, ref, pos);
-    
-    const rot = Cesium.HeadingPitchRoll.fromDegrees(90.0 - head, 0.0, 0.0);
-    const ori = Cesium.Transforms.headingPitchRollQuaternion(pos, rot); 
-  
-    vessel['position'] = new Cesium.ConstantPositionProperty(pos);
-    vessel['orientation'] = new Cesium.ConstantProperty(ori);
-  }
-
 
   //////////////////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////////////////
@@ -212,7 +163,7 @@ export class SeascapeService {
       outlineWidth: 2,
       style: Cesium.LabelStyle.FILL_AND_OUTLINE,
       verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-      pixelOffset: new Cesium.Cartesian2(0, -9)
+      pixelOffset: new Cesium.Cartesian2(0, -9),
     });
   
     return new Cesium.Entity({
@@ -225,7 +176,10 @@ export class SeascapeService {
         // minimumPixelSize: 128,
         // maximumScale: 1, 
         // distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 20000),
-      }
+      }, 
+
+      position: new Cesium.SampledPositionProperty(),
+      orientation: new Cesium.SampledProperty(Cesium.Quaternion),
     });
   }
 
