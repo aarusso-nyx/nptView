@@ -58,25 +58,25 @@ export class AppComponent implements OnInit, OnDestroy {
     // Set timeline to simulation bounds
     this.viewer.timeline.zoomTo(start, now);
 
-
-
+    // Set camera to home view
     this.goHome();
-    
+
+    // Add the seascape layer
     this.sea.pier(this.viewer, 'BRBTB', -56.38056, -1.46012);
 
     // Subscribe to the seascape service
-//  this.sub = this.sea.seascape (this.viewer, 'BRBTB', 120, 30)
     this.sub = this.sea.tracking (this.viewer, 'BRBTB')
       .subscribe();
   }
 
+  //////////////////////////////////////////////////////////////////////////////////////////
   // Clean up logic will be added in the next steps
   ngOnDestroy(): void {
     this.sub.unsubscribe();
   }
 
-
-
+  //////////////////////////////////////////////////////////////////////////////////////////
+  //////////////////////////////////////////////////////////////////////////////////////////
   goHome() {
     this.viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(-56.38056, -1.46012, 5000),
